@@ -12,12 +12,18 @@ import io.javalin.security.Roles
 import io.javalin.security.RouteRole
 import io.javalin.util.Util.firstOrNull
 import io.javalin.util.javalinLazy
+import io.javalin.util.JavalinLogger
 
 object DefaultTasks {
 
     val BEFORE = TaskInitializer<JavalinServletContext> { submitTask, servlet, ctx, requestUri ->
-        servlet.router.findHttpHandlerEntries(HandlerType.BEFORE, requestUri).forEach { entry ->
-            submitTask(LAST, Task(skipIfExceptionOccurred = true) { entry.handle(ctx, requestUri) })
+        {
+            servlet.router.findHttpHandlerEntries(HandlerType.BEFORE, requestUri).forEach {
+                entry -> {
+                    JavalinLogger.info("DefaultTasks.BEFORE{entry = ${entry}}")
+                    submitTask(LAST, Task(skipIfExceptionOccurred = true) { entry.handle(ctx, requestUri) })
+                }
+            }
         }
     }
 
@@ -30,7 +36,9 @@ object DefaultTasks {
             servlet.router.findHttpHandlerEntries(ctx.method(), requestUri).firstOrNull()
         }
         servlet.router.findHttpHandlerEntries(HandlerType.BEFORE_MATCHED, requestUri).forEach { entry ->
+            JavalinLogger.info("DefaultTasks.BEFORE_MATCHED{entry = [${entry.endpoint.method}, ${entry.endpoint.path}]}")
             if (willMatch) {
+
                 submitTask(LAST, Task(skipIfExceptionOccurred = true) {
                     val httpHandler = httpHandlerOrNull
                     if (httpHandler != null && !entry.endpoint.hasPathParams()) {
@@ -44,23 +52,36 @@ object DefaultTasks {
     }
 
     val HTTP = TaskInitializer<JavalinServletContext> { submitTask, servlet, ctx, requestUri ->
+        JavalinLogger.info("DefaultTasks.HTTP{requestUri = ${requestUri}}")
         servlet.router.findHttpHandlerEntries(ctx.method(), requestUri).firstOrNull { entry ->
+            JavalinLogger.info("DefaultTasks.HTTP{entry = [${entry.endpoint.method}, ${entry.endpoint.path}]}")
             submitTask(
                 LAST,
                 Task {
-                    ctx.setRouteRoles(servlet.matchedRoles(ctx, requestUri)) // set roles for the matched handler
+                    var roles = servlet.matchedRoles(ctx, requestUri) // set roles for the matched handler
+                    JavalinLogger.info("DefaultTasks.HTTP.SubmitTask{roles = ${roles}}")
+                    ctx.setRouteRoles(roles)
                     entry.handle(ctx, requestUri)
                 }
             )
             return@TaskInitializer
         }
+        JavalinLogger.info("DefaultTasks.HTTP.submitTask2 - Before")
         submitTask(LAST, Task {
             if (ctx.method() == HEAD && servlet.router.hasHttpHandlerEntry(GET, requestUri)) { // return 200, there is a get handler
                 return@Task
             }
             if (ctx.method() == HEAD || ctx.method() == GET) { // check for static resources (will write response if found)
-                if (servlet.cfg.pvt.resourceHandler?.handle(ctx) == true) return@Task
-                if (servlet.cfg.pvt.singlePageHandler.handle(ctx)) return@Task
+                var canResourceHandlerHandle = servlet.cfg.pvt.resourceHandler?.handle(ctx)
+                JavalinLogger.info("DefaultTasks.HTTP.submitTask2{ "+
+                    "ctx = [${ctx.method()}, ${ctx.handlerType()}], " +
+                    "requestUri = ${requestUri}, " +
+                    "canResourceHandlerHandle = ${canResourceHandlerHandle}, " +
+                    "}")
+                if (canResourceHandlerHandle == true) return@Task
+                var singlePageHandlerRes = servlet.cfg.pvt.singlePageHandler.handle(ctx)
+                JavalinLogger.info("DefaultTasks.HTTP.submitTask2{ singlePageHandlerRes = ${singlePageHandlerRes} }")
+                if (singlePageHandlerRes) return@Task
             }
             if (ctx.handlerType() == HandlerType.BEFORE) { // no match, status will be 404 or 405 after this point
                 ctx.endpointHandlerPath = "No handler matched request path/method (404/405)"
@@ -100,9 +121,19 @@ object DefaultTasks {
         else -> false
     }
 
-    private fun JavalinServlet.matchedRoles(ctx: JavalinServletContext, requestUri: String): Set<RouteRole> =
-        this.router.findHttpHandlerEntries(ctx.method(), requestUri).firstOrNull()?.endpoint?.metadata(Roles::class.java)?.roles ?: emptySet()
-
+    private fun JavalinServlet.matchedRoles(ctx: JavalinServletContext, requestUri: String): Set<RouteRole> {
+        val parsedEndpoint = this.router.findHttpHandlerEntries(ctx.method(), requestUri).firstOrNull()
+        JavalinLogger.info("JavalinServlet.matchedRoles. ctx : [[${ctx.method()}, ${ctx.handlerType()}, ${ctx.url()}]]")
+        val res = parsedEndpoint?.endpoint?.metadata(Roles::class.java)?.roles ?: emptySet()
+        if ( parsedEndpoint == null) {
+            JavalinLogger.info("JavalinServlet.matchedRoles - parsedEndpoint is null")
+            if ( ctx.method() == HEAD || ctx.method() == GET ) {
+                var staticHandlerConfig =  this.cfg.pvt.resourceHandler?.handlerConfig(ctx);
+                return staticHandlerConfig?.roles ?: emptySet();
+            }
+        }
+        return res
+    }
 }
 
 internal fun Endpoint.hasPathParams() = this.path.contains("{") || this.path.contains("<")
